@@ -1,0 +1,36 @@
+{
+  "name": "mongostate",
+  "version": "1.0.0",
+  "description": "Data state machine. Support transaction in mongoose.",
+  "main": "index.js",
+  "dependencies": {
+    "debug": "^2.3.2",
+    "mongoose": "^4.6.7",
+    "mongoose-timestamp": "^0.6.0"
+  },
+  "devDependencies": {
+    "co": "^4.6.0"
+  },
+  "scripts": {
+    "example": "DEBUG=mongostate node ./Example"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miserylee/mongostate.git"
+  },
+  "keywords": [
+    "mongo",
+    "mongodb",
+    "mongoose",
+    "transaction",
+    "rollback",
+    "state",
+    "machine"
+  ],
+  "author": "Misery Lee <miserylee@foxmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/miserylee/mongostate/issues"
+  },
+  "homepage": "https://github.com/miserylee/mongostate#readme"
+}
