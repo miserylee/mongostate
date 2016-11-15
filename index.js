@@ -42,7 +42,6 @@ const transactionSchema = new Schema({
     stack: String
   }
 });
-transactionSchema.plugin(timestamp);
 
 const lockSchema = new Schema({
   transaction: { type: Schema.ObjectId, required: true, index: true },
@@ -51,7 +50,11 @@ const lockSchema = new Schema({
 });
 
 lockSchema.index({ model: 1, entity: 1 }, { unique: true });
-lockSchema.plugin(timestamp);
+
+if(!mongoose.plugins.some(plugin => plugin[0] === timestamp)) {
+  transactionSchema.plugin(timestamp);
+  lockSchema.plugin(timestamp);
+}
 
 class Transaction {
   constructor ({
@@ -96,15 +99,16 @@ class Transaction {
   }) {
     if (wrapper.constructor.name !== 'GeneratorFunction') throw new Error('wrapper should be a generator function.');
     const transaction = yield this.findTransaction();
-    if(transaction.state === states.INIT) {
+    if (transaction.state === states.INIT) {
       yield this.transactionModel.findByIdAndUpdate(this.id, {
         $set: { state: states.PENDING }
       });
     }
+    let result;
     try {
       const transaction = yield this.findTransaction();
       if (transaction.state === states.PENDING) {
-        yield wrapper.bind(this)();
+        result = yield wrapper.bind(this)();
         yield this.commit();
       } else {
         yield this.cancel(new Error('Transaction is not pending!'));
@@ -113,6 +117,7 @@ class Transaction {
       yield this.cancel(err);
       throw err;
     }
+    return result;
   }
 
   use (Model) {
@@ -156,7 +161,7 @@ class Transaction {
       model: Model.modelName,
       entity: doc._id
     });
-    yield this.lock({id: doc._id}, Model);
+    yield this.lock({ id: doc._id }, Model);
     return yield SSModel.create(doc);
   }
 
@@ -197,7 +202,13 @@ class Transaction {
       return entity;
     }
     if (!entity) {
-      return yield Model.findOne(criteria);
+      const srcEntity = yield Model.findOne(criteria);
+      if(srcEntity) {
+        const data = srcEntity.toJSON();
+        delete data.__v;
+        yield SSModel.create(data);
+      }
+      return srcEntity;
     }
     return entity;
   }
@@ -272,7 +283,7 @@ class Transaction {
         default:
           break;
       }
-      yield SSModel.remove({ entity: action.entity });
+      yield SSModel.remove({ _id: action.entity });
     }
     yield this.unlock();
     yield this.transactionModel.findByIdAndUpdate(this.id, {
