@@ -4,6 +4,7 @@ const Schema = mongoose.Schema;
 const ObjectId = mongoose.Types.ObjectId;
 const timestamp = require('mongoose-timestamp');
 const debug = require('debug')('mongostate');
+const jsondiffpatch = require('jsondiffpatch').create();
 
 const states = {
   INIT: 'init',
@@ -26,6 +27,7 @@ const transactionSchema = new Schema({
     default: states.INIT,
     required: true
   },
+  usedModelNames: [String],
   actions: [{
     operation: {
       type: String, required: true, enums: [
@@ -35,12 +37,14 @@ const transactionSchema = new Schema({
       ]
     },
     model: { type: String, required: true },
-    entity: { type: String, required: true }
+    entity: { type: String, required: true },
+    enableHistory: { type: Boolean, default: false }
   }],
   error: {
     message: String,
     stack: String
-  }
+  },
+  biz: {}
 });
 
 const lockSchema = new Schema({
@@ -51,9 +55,25 @@ const lockSchema = new Schema({
 
 lockSchema.index({ model: 1, entity: 1 }, { unique: true });
 
-if(!mongoose.plugins.some(plugin => plugin[0] === timestamp)) {
+const historySchema = new Schema({
+  transaction: { type: Schema.ObjectId, required: true, index: true },
+  entity: { type: String, required: true, index: true },
+  biz: {},
+  prev: {},
+  diff: {},
+  reverted: { type: Boolean, default: false }
+});
+
+historySchema.virtual('current').get(function () {
+  return jsondiffpatch.patch(this.prev, this.diff);
+});
+
+historySchema.set('toJSON', { virtuals: true });
+
+if (!mongoose.plugins.some(plugin => plugin[0] === timestamp)) {
   transactionSchema.plugin(timestamp);
   lockSchema.plugin(timestamp);
+  historySchema.plugin(timestamp);
 }
 
 class Transaction {
@@ -61,29 +81,42 @@ class Transaction {
     connection,
     transactionModel,
     lockModel,
-    id
+    id,
+    historyConnection
   }) {
     this.id = id;
     this.transactionModel = transactionModel;
     this.lockModel = lockModel;
     this.connection = connection;
     this.usedModel = {};
+    this.historyConnection = historyConnection;
+  }
+
+  static getTransactionModel (connection, transactionCollectionName = 'transaction') {
+    if (!connection) throw new Error('connection is required!');
+    return connection.model(transactionCollectionName, transactionSchema);
+  }
+
+  static getLockModel (connection, lockCollectionName = 'lock') {
+    if (!connection) throw new Error('connection is required!');
+    return connection.model(lockCollectionName, lockSchema);
   }
 
   static * init ({
     connection,
     id,
-    transactionCollectionName = 'transaction',
-    lockCollectionName = 'lock'
+    transactionCollectionName,
+    lockCollectionName,
+    historyConnection,
+    biz = {}
   } = {}) {
-    if (!connection) throw new Error('connection is required!');
-    const transactionModel = connection.model(transactionCollectionName, transactionSchema);
-    const lockModel = connection.model(lockCollectionName, lockSchema);
+    const transactionModel = this.getTransactionModel(connection, transactionCollectionName);
+    const lockModel = this.getLockModel(connection, lockCollectionName);
     let t;
     if (id) t = yield transactionModel.findById(id);
     if (!t) {
       id = id || new ObjectId;
-      yield transactionModel.create({ _id: id });
+      yield transactionModel.create({ _id: id, biz: JSON.parse(JSON.stringify(biz)) });
     } else {
       if ([states.CANCELLED, states.COMMITTED].includes(t.state)) throw new Error(`The transaction [${t.id}] has [${t.state}].`);
     }
@@ -91,7 +124,8 @@ class Transaction {
       connection,
       transactionModel,
       lockModel,
-      id
+      id,
+      historyConnection
     });
   }
 
@@ -120,36 +154,93 @@ class Transaction {
     return result;
   }
 
-  use (Model) {
+  use (Model, enableHistory = true) {
     const modelName = Model.modelName;
-    const SSModel = this.connection.model(`sub_state_${modelName}`, Model.schema);
-    this.usedModel[modelName] = { Model, SSModel };
+    const schema = Model.schema;
+    schema.add({
+      __t: { type: Schema.ObjectId, required: true }
+    });
+    const SSModel = this.connection.model(`sub_state_${modelName}`, schema);
+    if (!this.usedModel[modelName]) {
+      this.usedModel[modelName] = { Model, SSModel };
+      this.transactionModel.findOneAndUpdate({
+        _id: this.id,
+        usedModelNames: { $ne: modelName }
+      }, {
+        $push: {
+          usedModelNames: modelName
+        }
+      }).exec();
+    }
+    let History;
+    if (this.historyConnection) {
+      History = this.historyConnection.model(`${modelName}_history`, historySchema);
+    }
     return {
       create: function * (...params) {
-        return yield this.create.bind(this)(Model, SSModel, params);
+        return yield this.create.bind(this)(Model, SSModel, params, enableHistory);
       }.bind(this),
       findOneAndUpdate: function * (...params) {
-        return yield this.findOneAndUpdate.bind(this)(Model, SSModel, params);
+        return yield this.findOneAndUpdate.bind(this)(Model, SSModel, params, enableHistory);
       }.bind(this),
       findByIdAndUpdate: function * (...params) {
-        return yield this.findByIdAndUpdate.bind(this)(Model, SSModel, params);
+        return yield this.findByIdAndUpdate.bind(this)(Model, SSModel, params, enableHistory);
       }.bind(this),
       findByIdAndRemove: function * (...params) {
-        return yield this.findByIdAndRemove.bind(this)(Model, SSModel, params);
+        return yield this.findByIdAndRemove.bind(this)(Model, SSModel, params, enableHistory);
       }.bind(this),
       findOneAndRemove: function * (...params) {
-        return yield this.findOneAndRemove.bind(this)(Model, SSModel, params);
+        return yield this.findOneAndRemove.bind(this)(Model, SSModel, params, enableHistory);
       }.bind(this),
       findOne: function * (...params) {
         return yield this.findOne.bind(this)(Model, SSModel, params);
       }.bind(this),
       findById: function * (...params) {
         return yield this.findById.bind(this)(Model, SSModel, params);
+      }.bind(this),
+      findHistories: function * (...params) {
+        if (!History) return [];
+        return yield History.find(...params);
+      },
+      findLatestHistory: function * (...params) {
+        if (!History) return null;
+        return yield History.findOne(...params).sort({ _id: -1 });
+      },
+      revertTo: function * (historyId) {
+        if(!Transaction.noWarning) {
+          console.warn('The `revertTo` method is dangerous, only use it when you know why!');
+        }
+        if (!History) return null;
+        const transaction = yield this.findTransaction();
+        const history = yield History.findById(historyId);
+        if (!history) throw new Error(`The history [${historyId}] is not exists!`);
+        const doc = history.toJSON().prev;
+        const prevEntity = yield Model.findById(history.entity);
+        let prev;
+        if (prevEntity) {
+          prev = prevEntity.toJSON();
+          delete prev.__v;
+        }
+        const diff = jsondiffpatch.diff(prev, doc);
+        yield History.create({
+          transaction: this.id,
+          entity: history.entity,
+          biz: transaction.biz,
+          prev,
+          diff,
+          reverted: true
+        });
+        if (doc) {
+          return yield Model.findByIdAndUpdate(history.entity, doc, { upsert: true, new: true });
+        } else {
+          yield Model.findByIdAndRemove(history.entity);
+          return null;
+        }
       }.bind(this)
     };
   }
 
-  * create (Model, SSModel, [doc]) {
+  * create (Model, SSModel, [doc], enableHistory) {
     if (!doc._id) {
       doc._id = new ObjectId;
     } else {
@@ -159,40 +250,43 @@ class Transaction {
     yield this.pushAction({
       operation: operations.CREATE,
       model: Model.modelName,
-      entity: doc._id
+      entity: doc._id,
+      enableHistory
     });
     yield this.lock({ id: doc._id }, Model);
-    return yield SSModel.create(doc);
+    return yield this.initSubStateData(SSModel, doc);
   }
 
-  * findOneAndUpdate (Model, SSModel, [query, doc, options]) {
+  * findOneAndUpdate (Model, SSModel, [query, doc, options], enableHistory) {
     const entity = yield this.findOne(Model, SSModel, [query]);
     if (!entity) throw new Error('Entity is not exists');
     yield this.pushAction({
       operation: operations.UPDATE,
       model: Model.modelName,
-      entity: entity.id
+      entity: entity.id,
+      enableHistory
     });
     yield this.lock(entity, Model);
     return yield SSModel.findOneAndUpdate(query, doc, options);
   }
 
-  * findByIdAndUpdate (Model, SSModel, [id, doc, options]) {
-    return yield this.findOneAndUpdate(Model, SSModel, [{ _id: id }, doc, options]);
+  * findByIdAndUpdate (Model, SSModel, [id, doc, options], enableHistory) {
+    return yield this.findOneAndUpdate(Model, SSModel, [{ _id: id }, doc, options], enableHistory);
   }
 
-  * findOneAndRemove (Model, SSModel, [query]) {
+  * findOneAndRemove (Model, SSModel, [query], enableHistory) {
     const entity = yield this.findOne(Model, SSModel, [query]);
     yield this.pushAction({
       operation: operations.REMOVE,
       model: Model.modelName,
-      entity: entity.id
+      entity: entity.id,
+      enableHistory
     });
     yield this.lock(entity, Model);
   }
 
-  * findByIdAndRemove (Model, SSModel, [id]) {
-    yield this.findOneAndRemove(Model, SSModel, [{ _id: id }]);
+  * findByIdAndRemove (Model, SSModel, [id], enableHistory) {
+    yield this.findOneAndRemove(Model, SSModel, [{ _id: id }], enableHistory);
   }
 
   * findOne (Model, SSModel, [criteria]) {
@@ -203,10 +297,10 @@ class Transaction {
     }
     if (!entity) {
       const srcEntity = yield Model.findOne(criteria);
-      if(srcEntity) {
-        const data = srcEntity.toJSON();
-        delete data.__v;
-        yield SSModel.create(data);
+      if (srcEntity) {
+        const doc = srcEntity.toJSON();
+        delete doc.__v;
+        yield this.initSubStateData(SSModel, doc);
       }
       return srcEntity;
     }
@@ -241,6 +335,11 @@ class Transaction {
     }
   }
 
+  * initSubStateData (SSModel, doc) {
+    doc.__t = this.id;
+    return yield SSModel.create(doc);
+  }
+
   * pushAction (action) {
     yield this.transactionModel.findByIdAndUpdate(this.id, {
       $push: {
@@ -256,35 +355,52 @@ class Transaction {
   * commit () {
     const transaction = yield this.findTransaction();
     if (transaction.state !== states.PENDING) throw new Error(`Expected the transaction [${this.id}] to be pending, but got ${transaction.state}`);
-    for (let action of transaction.actions) {
-      const { Model, SSModel } = this.usedModel[action.model] || {};
-      if (!Model) throw new Error(`Model ${action.model} has not used, please use the model first`);
-      switch (action.operation) {
-        case operations.CREATE: {
-          const subStateEntity = yield SSModel.findById(action.entity);
-          if (!subStateEntity) break;
-          const data = subStateEntity.toJSON();
-          delete data.__v;
-          yield Model.create(data);
-          break;
-        }
-        case operations.UPDATE: {
-          const subStateEntity = yield SSModel.findById(action.entity);
-          if (!subStateEntity) break;
-          const data = subStateEntity.toJSON();
-          delete data.__v;
-          yield Model.findByIdAndUpdate(action.entity, data);
-          break;
-        }
-        case operations.REMOVE: {
-          yield Model.findByIdAndRemove(action.entity);
-          break;
-        }
-        default:
-          break;
+
+    const entitiesActivated = [];
+
+    for (let action of transaction.actions.reverse()) {
+      const { model, entity, enableHistory, operation } = action;
+      if (entitiesActivated.includes(`${model}:${entity}`)) continue;
+      entitiesActivated.push(`${model}:${entity}`);
+      const { Model, SSModel } = this.usedModel[model] || {};
+      if (!Model) throw new Error(`Model ${model} has not used, please use the model first`);
+      const subStateEntity = yield SSModel.findById(entity);
+      let doc;
+      if (subStateEntity) {
+        doc = subStateEntity.toJSON();
+        delete doc.__v;
+        delete doc.__t;
+        delete doc.createdAt;
+        delete doc.updatedAt;
       }
-      yield SSModel.remove({ _id: action.entity });
+      // Record histories
+      if (this.historyConnection && enableHistory) {
+        const History = this.historyConnection.model(`${model}_history`, historySchema);
+        const prevEntity = yield Model.findById(entity);
+        let prev;
+        if (prevEntity) {
+          prev = prevEntity.toJSON();
+          delete prev.__v;
+        }
+        const diff = jsondiffpatch.diff(prev, doc);
+        yield History.create({
+          transaction: this.id,
+          entity,
+          biz: transaction.biz,
+          prev,
+          diff,
+        });
+      }
+      if (doc) {
+        const doc = subStateEntity.toJSON();
+        delete doc.__v;
+        delete doc.__t;
+        yield Model.findByIdAndUpdate(entity, doc, { upsert: true });
+      } else {
+        yield Model.findByIdAndRemove(entity);
+      }
     }
+    yield this.clearSubStateData();
     yield this.unlock();
     yield this.transactionModel.findByIdAndUpdate(this.id, {
       $set: {
@@ -302,11 +418,7 @@ class Transaction {
         state: states.ROLLBACK
       }
     });
-    for (let action of transaction.actions) {
-      const { Model, SSModel } = this.usedModel[action.model] || {};
-      if (!Model) throw new Error(`Model ${action.model} has not used, please use the model first`);
-      yield SSModel.remove(action.entity);
-    }
+    yield this.clearSubStateData();
     debug(`Transaction [${this.id}] rollback success!`);
   }
 
@@ -325,6 +437,18 @@ class Transaction {
       }
     });
     debug(`Transaction [${this.id}] cancelled!`);
+  }
+
+  * clearSubStateData () {
+    const usedModelNames = Object.keys(this.usedModel);
+    const t = yield this.findTransaction();
+    if (t.usedModelNames.some(modelName => !usedModelNames.includes(modelName))) {
+      throw new Error(`${t.usedModelNames} should be used first!`);
+    }
+    for (let modelName of usedModelNames) {
+      const { SSModel } = this.usedModel[modelName];
+      yield SSModel.remove({ __t: this.id });
+    }
   }
 
   * unlock () {

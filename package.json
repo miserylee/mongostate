@@ -1,10 +1,11 @@
 {
   "name": "mongostate",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Data state machine. Support transaction in mongoose.",
   "main": "index.js",
   "dependencies": {
     "debug": "^2.3.2",
+    "jsondiffpatch": "^0.2.4",
     "mongoose": "^4.6.7",
     "mongoose-timestamp": "^0.6.0"
   },

@@ -3,20 +3,33 @@ const Wallet = require('./Wallet');
 const co = require('co');
 const Transaction = require('../');
 const connection = require('./connection');
+Transaction.noWarning = true;
 
 co(function * () {
   yield connection.dropDatabase();
-  const t = yield Transaction.init({ connection });
+  const t = yield Transaction.init({
+    connection,
+    historyConnection: connection,
+    biz: {
+      operator: 'system'
+    }
+  });
   yield t.try(function * () {
     yield createPersonAndRecharge.bind(this)({
       name: 'Misery',
       gender: 'male',
       amount: 100
-    })
+    });
   });
-  const person = yield Person.find();
-  const wallet = yield Wallet.find();
-  console.log(person, wallet);
+  const people = yield Person.find();
+  console.log(people);
+  const wallets = yield Wallet.find();
+  console.log(wallets);
+  const peopleHistory = yield t.use(Person).findLatestHistory();
+  console.log(peopleHistory.toJSON());
+  const revertedPerson = yield t.use(Person).revertTo(peopleHistory.id);
+  console.log(revertedPerson);
+  console.log((yield t.use(Person).findLatestHistory()).toJSON());
 }).catch(console.error);
 
 function * createPersonAndRecharge ({ name, gender, amount }) {

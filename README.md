@@ -40,22 +40,31 @@ function * createPersonAndRecharge ({ name, gender, amount }) {
 ```
 
 ### API
-Init the transaction with mongoose `connection` and other options params like:
+`init` the transaction with mongoose `connection` and other options params like:
 * `transactionCollectionName`  `default: 'transaction'`, where to save the transaction data.
 * `lockCollectionName`  `default: 'lock'`, where to save the lock data.
 * `id`  If `id` is passed, the transaction will init by the certain id and if there is a transaction with the same id in the collection, it will be used the continue.
-
-These methods can be used as mongoose methods.
-* `create`
-* `findByIdAndUpdate`
-* `findOneAndUpdate`
-* `findByIdAndRemove`
-* `findOneAndRemove`
-* `findOne`
-* `findById`
+* `historyConnection` If `historyConnection` is passed, you can use `this.use(Person, true)` to enable Person model to record histories.
 
 Make all unsafe operations in `try` method, and they will be automatic rollback when some error thrown in the closure.
 
+These methods can be used as mongoose methods.
+* `* create`
+* `* findByIdAndUpdate`
+* `* findOneAndUpdate`
+* `* findByIdAndRemove`
+* `* findOneAndRemove`
+* `* findOne`
+* `* findById`
+
+These methods are for history supporting. Check example for detail usage.
+* `* findHistories`
+* `* findLatestHistory`
+* `* revertTo`
+
+These static methods are for more advanced usage.
+* `getTransactionModel`
+* `getLockModel`
 
 ### Contributing
 - Fork this Repo first
