@@ -404,9 +404,7 @@ class Transaction {
         delete doc.__v;
         delete doc.__t;
         if (prevEntity) {
-          console.log(doc);
           const result = yield Model.findByIdAndUpdate(entity, doc, { new: true });
-          console.log(result);
         } else {
           yield Model.create(doc);
         }
