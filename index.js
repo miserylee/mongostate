@@ -401,7 +401,11 @@ class Transaction {
         delete doc.__t;
         delete doc.createdAt;
         delete doc.updatedAt;
-        yield Model.findByIdAndUpdate(entity, doc, { upsert: true , overwrite: true});
+        if(!prevEntity) {
+          yield Model.findByIdAndUpdate(entity, doc, { upsert: true });
+        } else {
+          yield Model.findByIdAndUpdate(entity, doc, { overwrite: true });
+        }
       } else {
         yield Model.findByIdAndRemove(entity);
       }
