@@ -158,7 +158,7 @@ class Transaction {
     const modelName = Model.modelName;
     const schema = Model.schema;
     schema.add({
-      __t: { type: Schema.ObjectId, required: true }
+      __t: { type: Schema.ObjectId }
     });
     const SSModel = this.connection.model(`sub_state_${modelName}`, schema);
     if (!this.usedModel[modelName]) {
@@ -207,7 +207,7 @@ class Transaction {
         return yield History.findOne(...params).sort({ _id: -1 });
       },
       revertTo: function * (historyId) {
-        if(!Transaction.noWarning) {
+        if (!Transaction.noWarning) {
           console.warn('The `revertTo` method is dangerous, only use it when you know why!');
         }
         if (!History) return null;
@@ -254,7 +254,7 @@ class Transaction {
       enableHistory
     });
     yield this.lock({ id: doc._id }, Model);
-    if(doc.constructor.name === 'model') {
+    if (doc.constructor.name === 'model') {
       doc = doc.toJSON();
     }
     return yield this.initSubStateData(SSModel, doc);
@@ -270,8 +270,12 @@ class Transaction {
       enableHistory
     });
     yield this.lock(entity, Model);
-    if(!doc.$set) {
-      doc.__t = this.id;
+    if(doc.$unset) {
+      Object.keys(doc.$unset).forEach(key => {
+        doc.$set = doc.$set || {};
+        doc.$set[key] = null;
+      });
+      delete doc.$unset;
     }
     return yield SSModel.findOneAndUpdate(query, doc, options);
   }
@@ -377,10 +381,10 @@ class Transaction {
         delete doc.__v;
         delete doc.__t;
       }
+      const prevEntity = yield Model.findById(entity);
       // Record histories
       if (this.historyConnection && enableHistory) {
         const History = this.historyConnection.model(`${model}_history`, historySchema);
-        const prevEntity = yield Model.findById(entity);
         let prev;
         if (prevEntity) {
           prev = prevEntity.toJSON();
@@ -399,12 +403,12 @@ class Transaction {
         const doc = subStateEntity.toJSON();
         delete doc.__v;
         delete doc.__t;
-        delete doc.createdAt;
-        delete doc.updatedAt;
-        if(!prevEntity) {
-          yield Model.findByIdAndUpdate(entity, doc, { upsert: true });
+        if (prevEntity) {
+          console.log(doc);
+          const result = yield Model.findByIdAndUpdate(entity, doc, { new: true });
+          console.log(result);
         } else {
-          yield Model.findByIdAndUpdate(entity, doc, { overwrite: true });
+          yield Model.create(doc);
         }
       } else {
         yield Model.findByIdAndRemove(entity);
