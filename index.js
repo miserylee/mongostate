@@ -254,6 +254,9 @@ class Transaction {
       enableHistory
     });
     yield this.lock({ id: doc._id }, Model);
+    if(doc.constructor.name === 'model') {
+      doc = doc.toJSON();
+    }
     return yield this.initSubStateData(SSModel, doc);
   }
 
@@ -267,6 +270,9 @@ class Transaction {
       enableHistory
     });
     yield this.lock(entity, Model);
+    if(!doc.$set) {
+      doc.__t = this.id;
+    }
     return yield SSModel.findOneAndUpdate(query, doc, options);
   }
 
@@ -370,8 +376,6 @@ class Transaction {
         doc = subStateEntity.toJSON();
         delete doc.__v;
         delete doc.__t;
-        delete doc.createdAt;
-        delete doc.updatedAt;
       }
       // Record histories
       if (this.historyConnection && enableHistory) {
@@ -395,6 +399,8 @@ class Transaction {
         const doc = subStateEntity.toJSON();
         delete doc.__v;
         delete doc.__t;
+        delete doc.createdAt;
+        delete doc.updatedAt;
         yield Model.findByIdAndUpdate(entity, doc, { upsert: true });
       } else {
         yield Model.findByIdAndRemove(entity);
