@@ -156,11 +156,20 @@ class Transaction {
 
   use (Model, enableHistory = true) {
     const modelName = Model.modelName;
-    const schema = Model.schema;
-    schema.add({
-      __t: { type: Schema.ObjectId }
-    });
-    const SSModel = this.connection.model(`sub_state_${modelName}`, schema);
+    let SSModel;
+    const SSModelName = `sub_state_${modelName}`;
+    try {
+      SSModel = this.connection.model(SSModelName);
+    } catch (err) {
+      if (err.name === 'MissingSchemaError') {
+        const schema = Model.schema;
+        schema.add({
+          __t: { type: Schema.ObjectId },
+        });
+        SSModel = this.connection.model(SSModelName, schema);
+      } else throw err;
+    }
+    if (!SSModel) throw new Error(`SSModel [${SSModelName}] has not registed!`);
     if (!this.usedModel[modelName]) {
       this.usedModel[modelName] = { Model, SSModel };
       this.transactionModel.findOneAndUpdate({
@@ -243,17 +252,15 @@ class Transaction {
   * create (Model, SSModel, [doc], enableHistory) {
     if (!doc._id) {
       doc._id = new ObjectId;
-    } else {
-      const entity = yield this.findById(Model, SSModel, [doc._id]);
-      if (entity) throw new Error('entity has already exists!');
     }
+    const entity = yield this.findById(Model, SSModel, [doc._id]);
+    if (entity) throw new Error(`Entity [${Model.modelName}:${doc._id}] has already exists!`);
     yield this.pushAction({
       operation: operations.CREATE,
       model: Model.modelName,
       entity: doc._id,
       enableHistory
     });
-    yield this.lock({ id: doc._id }, Model);
     if (doc.constructor.name === 'model') {
       doc = doc.toJSON();
     }
@@ -262,15 +269,14 @@ class Transaction {
 
   * findOneAndUpdate (Model, SSModel, [query, doc, options], enableHistory) {
     const entity = yield this.findOne(Model, SSModel, [query]);
-    if (!entity) throw new Error('Entity is not exists');
+    if (!entity) throw new Error(`Entity [${Model.modelName}:${JSON.stringify(query)}] is not exists`);
     yield this.pushAction({
       operation: operations.UPDATE,
       model: Model.modelName,
       entity: entity.id,
       enableHistory
     });
-    yield this.lock(entity, Model);
-    if(doc.$unset) {
+    if (doc.$unset) {
       Object.keys(doc.$unset).forEach(key => {
         doc.$set = doc.$set || {};
         doc.$set[key] = null;
@@ -292,7 +298,7 @@ class Transaction {
       entity: entity.id,
       enableHistory
     });
-    yield this.lock(entity, Model);
+    yield SSModel.findOneAndRemove(query);
   }
 
   * findByIdAndRemove (Model, SSModel, [id], enableHistory) {
@@ -300,13 +306,10 @@ class Transaction {
   }
 
   * findOne (Model, SSModel, [criteria]) {
+    const srcEntity = yield Model.findOne(criteria);
+    yield this.lock(srcEntity || { _id: criteria._id || new ObjectId }, Model);
     const entity = yield SSModel.findOne(criteria);
-    const lock = yield this.checkLock(entity, Model);
-    if (lock) {
-      return entity;
-    }
     if (!entity) {
-      const srcEntity = yield Model.findOne(criteria);
       if (srcEntity) {
         const doc = srcEntity.toJSON();
         delete doc.__v;
@@ -321,27 +324,25 @@ class Transaction {
     return yield this.findOne(Model, SSModel, [{ _id: id }]);
   }
 
-  * checkLock (entity, Model) {
-    if (!entity) return null;
-    const lock = yield this.lockModel.findOne({
-      model: Model.modelName,
-      entity: entity.id
-    });
-    if (lock && lock.transaction.toString() !== this.id.toString()) {
-      throw new Error(`entity [${entity.id}] is locked by transaction [${lock.transaction}]`);
-    }
-    return lock;
-  }
-
   * lock (entity, Model) {
-    if (!entity) throw new Error('Entity is not exists!');
-    const lock = yield this.checkLock(entity, Model);
-    if (!lock) {
-      yield this.lockModel.create({
+    if (!entity) throw new Error(`Entity [${Model.modelName}:${entity._id}] is not exists`);
+    try {
+      const lock = yield this.lockModel.findOne({
         transaction: this.id,
         model: Model.modelName,
-        entity: entity.id
+        entity: entity._id
       });
+      if(!lock){
+        yield this.lockModel.create({
+          transaction: this.id,
+          model: Model.modelName,
+          entity: entity._id
+        });
+      }
+    } catch (err) {
+      if (err.name === 'MongoError' && err.code === 11000) {
+        throw new Error(`Entity [${Model.modelName}:${entity.id}] is locked!`);
+      } else throw err;
     }
   }
 
