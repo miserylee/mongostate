@@ -21,7 +21,7 @@ co(function * () {
           $set: { 'profile.nickname': 'Luna' }
         });
       });
-    }).catch(error => console.error(error.message));
+    }).catch(error => console.error(error.message, error.type, error.wrongdoer, error.name));
   });
 
 }).catch(console.error);

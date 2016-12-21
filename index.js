@@ -5,6 +5,25 @@ const ObjectId = mongoose.Types.ObjectId;
 const timestamp = require('mongoose-timestamp');
 const debug = require('debug')('mongostate');
 const jsondiffpatch = require('jsondiffpatch').create();
+const Errrr = require('errrr');
+
+class Error extends Errrr {
+  constructor (message, type) {
+    super(message);
+    this.type = type;
+    this.wrongdoer = 'mongostate';
+  }
+}
+
+const errorTypes = {
+  INTERNAL_ERROR: 'INTERNAL_ERROR',
+  INVALID_OPERATION: 'INVALID_OPERATION',
+  MISSING_PARAMETER: 'MISSING_PARAMETER',
+  INVALID_PARAMETER: 'INVALID_PARAMETER',
+  INVALID_TRANSACTION_STATE: 'INVALID_TRANSACTION_STATE',
+  INVALID_ENTITY_STATE: 'INVALID_ENTITY_STATE',
+  ENTITY_LOCKED: 'ENTITY_LOCKED'
+};
 
 const states = {
   INIT: 'init',
@@ -93,12 +112,12 @@ class Transaction {
   }
 
   static getTransactionModel (connection, transactionCollectionName = 'transaction') {
-    if (!connection) throw new Error('connection is required!');
+    if (!connection) throw new Error('connection is required!', errorTypes.MISSING_PARAMETER);
     return connection.model(transactionCollectionName, transactionSchema);
   }
 
   static getLockModel (connection, lockCollectionName = 'lock') {
-    if (!connection) throw new Error('connection is required!');
+    if (!connection) throw new Error('connection is required!', errorTypes.MISSING_PARAMETER);
     return connection.model(lockCollectionName, lockSchema);
   }
 
@@ -118,7 +137,7 @@ class Transaction {
       id = id || new ObjectId;
       yield transactionModel.create({ _id: id, biz: JSON.parse(JSON.stringify(biz)) });
     } else {
-      if ([states.CANCELLED, states.COMMITTED].includes(t.state)) throw new Error(`The transaction [${t.id}] has [${t.state}].`);
+      if ([states.CANCELLED, states.COMMITTED].includes(t.state)) throw new Error(`The transaction [${t.id}] has [${t.state}].`, errorTypes.INVALID_TRANSACTION_STATE);
     }
     return new this({
       connection,
@@ -131,7 +150,7 @@ class Transaction {
 
   * 'try' (wrapper = function * () {
   }) {
-    if (wrapper.constructor.name !== 'GeneratorFunction') throw new Error('wrapper should be a generator function.');
+    if (wrapper.constructor.name !== 'GeneratorFunction') throw new Error('wrapper should be a generator function.', errorTypes.INVALID_PARAMETER);
     const transaction = yield this.findTransaction();
     if (transaction.state === states.INIT) {
       yield this.transactionModel.findByIdAndUpdate(this.id, {
@@ -145,7 +164,7 @@ class Transaction {
         result = yield wrapper.bind(this)();
         yield this.commit();
       } else {
-        yield this.cancel(new Error('Transaction is not pending!'));
+        yield this.cancel(new Error('Transaction is not pending!', errorTypes.INVALID_TRANSACTION_STATE));
       }
     } catch (err) {
       yield this.cancel(err);
@@ -169,7 +188,7 @@ class Transaction {
         SSModel = this.connection.model(SSModelName, schema);
       } else throw err;
     }
-    if (!SSModel) throw new Error(`SSModel [${SSModelName}] has not registed!`);
+    if (!SSModel) throw new Error(`SSModel [${SSModelName}] has not registed!`, errorTypes.INTERNAL_ERROR);
     if (!this.usedModel[modelName]) {
       this.usedModel[modelName] = { Model, SSModel };
       this.transactionModel.findOneAndUpdate({
@@ -222,7 +241,7 @@ class Transaction {
         if (!History) return null;
         const transaction = yield this.findTransaction();
         const history = yield History.findById(historyId);
-        if (!history) throw new Error(`The history [${historyId}] is not exists!`);
+        if (!history) throw new Error(`The history [${historyId}] is not exists!`, errorTypes.INVALID_OPERATION);
         const doc = history.toJSON().prev;
         const prevEntity = yield Model.findById(history.entity);
         let prev;
@@ -254,7 +273,7 @@ class Transaction {
       doc._id = new ObjectId;
     }
     const entity = yield this.findById(Model, SSModel, [doc._id]);
-    if (entity) throw new Error(`Entity [${Model.modelName}:${doc._id}] has already exists!`);
+    if (entity) throw new Error(`Entity [${Model.modelName}:${doc._id}] has already exists!`, errorTypes.INVALID_ENTITY_STATE);
     yield this.pushAction({
       operation: operations.CREATE,
       model: Model.modelName,
@@ -269,7 +288,7 @@ class Transaction {
 
   * findOneAndUpdate (Model, SSModel, [query, doc, options], enableHistory) {
     const entity = yield this.findOne(Model, SSModel, [query]);
-    if (!entity) throw new Error(`Entity [${Model.modelName}:${JSON.stringify(query)}] is not exists`);
+    if (!entity) throw new Error(`Entity [${Model.modelName}:${JSON.stringify(query)}] is not exists`, errorTypes.INVALID_ENTITY_STATE);
     yield this.pushAction({
       operation: operations.UPDATE,
       model: Model.modelName,
@@ -325,14 +344,14 @@ class Transaction {
   }
 
   * lock (entity, Model) {
-    if (!entity) throw new Error(`Entity [${Model.modelName}:${entity._id}] is not exists`);
+    if (!entity) throw new Error(`Entity [${Model.modelName}:${entity._id}] is not exists`, errorTypes.INVALID_ENTITY_STATE);
     try {
       const lock = yield this.lockModel.findOne({
         transaction: this.id,
         model: Model.modelName,
         entity: entity._id
       });
-      if(!lock){
+      if (!lock) {
         yield this.lockModel.create({
           transaction: this.id,
           model: Model.modelName,
@@ -341,7 +360,7 @@ class Transaction {
       }
     } catch (err) {
       if (err.name === 'MongoError' && err.code === 11000) {
-        throw new Error(`Entity [${Model.modelName}:${entity.id}] is locked!`);
+        throw new Error(`Entity [${Model.modelName}:${entity.id}] is locked!`, errorTypes.ENTITY_LOCKED);
       } else throw err;
     }
   }
@@ -365,7 +384,7 @@ class Transaction {
 
   * commit () {
     const transaction = yield this.findTransaction();
-    if (transaction.state !== states.PENDING) throw new Error(`Expected the transaction [${this.id}] to be pending, but got ${transaction.state}`);
+    if (transaction.state !== states.PENDING) throw new Error(`Expected the transaction [${this.id}] to be pending, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
 
     const entitiesActivated = [];
 
@@ -374,7 +393,7 @@ class Transaction {
       if (entitiesActivated.includes(`${model}:${entity}`)) continue;
       entitiesActivated.push(`${model}:${entity}`);
       const { Model, SSModel } = this.usedModel[model] || {};
-      if (!Model) throw new Error(`Model ${model} has not used, please use the model first`);
+      if (!Model) throw new Error(`Model ${model} has not used, please use the model first`, errorTypes.INVALID_OPERATION);
       const subStateEntity = yield SSModel.findById(entity);
       let doc;
       if (subStateEntity) {
@@ -425,7 +444,7 @@ class Transaction {
 
   * rollback () {
     const transaction = yield this.findTransaction();
-    if (![states.PENDING, states.ROLLBACK].includes(transaction.state)) throw new Error(`Expected the transaction [${this.id}] to be pending/rollback, but got ${transaction.state}`);
+    if (![states.PENDING, states.ROLLBACK].includes(transaction.state)) throw new Error(`Expected the transaction [${this.id}] to be pending/rollback, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
     yield this.transactionModel.findByIdAndUpdate(this.id, {
       $set: {
         state: states.ROLLBACK
@@ -437,7 +456,7 @@ class Transaction {
 
   * cancel (error) {
     const transaction = yield this.findTransaction();
-    if (![states.PENDING, states.ROLLBACK].includes(transaction.state)) throw new Error(`Expected the transaction [${this.id}] to be pending/rollback, but got ${transaction.state}`);
+    if (![states.PENDING, states.ROLLBACK].includes(transaction.state)) throw new Error(`Expected the transaction [${this.id}] to be pending/rollback, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
     yield this.rollback();
     yield this.unlock();
     yield this.transactionModel.findByIdAndUpdate(this.id, {
@@ -456,7 +475,7 @@ class Transaction {
     const usedModelNames = Object.keys(this.usedModel);
     const t = yield this.findTransaction();
     if (t.usedModelNames.some(modelName => !usedModelNames.includes(modelName))) {
-      throw new Error(`${t.usedModelNames} should be used first!`);
+      throw new Error(`${t.usedModelNames} should be used first!`, errorTypes.INVALID_OPERATION);
     }
     for (let modelName of usedModelNames) {
       const { SSModel } = this.usedModel[modelName];
