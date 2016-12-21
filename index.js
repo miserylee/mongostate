@@ -490,3 +490,6 @@ class Transaction {
 }
 
 module.exports = Transaction;
+module.exports.errorTypes = errorTypes;
+module.exports.states = states;
+module.exports.Error = Error;
