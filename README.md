@@ -2,6 +2,8 @@
 
 Data state machine. Support transaction in mongoose.
 
+[中文文档](https://github.com/miserylee/mongostate/blob/master/README_zh.md)
+
 ### Installation
 ```bash
 $ npm install mongostate --save
