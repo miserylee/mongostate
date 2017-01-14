@@ -1,6 +1,6 @@
 {
   "name": "mongostate",
-  "version": "1.1.13",
+  "version": "1.1.14",
   "description": "Data state machine. Support transaction in mongoose.",
   "main": "index.js",
   "dependencies": {

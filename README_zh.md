@@ -1,13 +1,13 @@
 ## mongostate ![NPM version](https://img.shields.io/npm/v/mongostate.svg?style=flat)
 
-Data state machine. Support transaction in mongoose.
+数据状态机，让mongoose支持事务。
 
-### Installation
+### 安装
 ```bash
 $ npm install mongostate --save
 ```
 
-### Example
+### 示例
 ```js
 const Person = require('./Person');
 const Wallet = require('./Wallet');
@@ -40,16 +40,16 @@ function * createPersonAndRecharge ({ name, gender, amount }) {
 ```
 
 ### API
+使用mongoose连接和其他可选参数初始化`init`事务，可选参数如下:
 
-`init` the transaction with mongoose `connection` and other options params like:
-* `transactionCollectionName`  `default: 'transaction'`, where to save the transaction data.
-* `lockCollectionName`  `default: 'lock'`, where to save the lock data.
-* `id`  If `id` is passed, the transaction will init by the certain id and if there is a transaction with the same id in the collection, it will be used the continue.
-* `historyConnection` If `historyConnection` is passed, you can use `this.use(Person, true)` to enable Person model to record histories.
+* `transactionCollectionName`  `默认值: 'transaction'`, 存储事务数据的collection.
+* `lockCollectionName`  `默认值: 'lock'`, 存储锁数据的collection.
+* `id`  如果传入了`id`，会生成该id的事务对象，如果事务数据中有相同id的事务，后续操作将会基于该事务。
+* `historyConnection` 如果传入了`historyConnection`，你可以使用`this.use(Person, true)`来使Person数据支持历史记录。
 
-Make all unsafe operations in `try` method, and they will be automatic rollback when some error thrown in the closure.
+注意：所有的不安全的操作应该放在`try`方法内，在这个闭包内如果发生了错误，所有的这些操作将会自动回滚。
 
-These methods can be used as mongoose methods.
+以下方法可以和mongoose的方法一样的使用（带 * 表示该方法为generator）：
 
 * `* create`
 * `* findByIdAndUpdate`
@@ -59,13 +59,13 @@ These methods can be used as mongoose methods.
 * `* findOne`
 * `* findById`
 
-These methods are for history supporting. Check example for detail usage.
+以下方法是对历史记录的支持，请在示例代码中查看详细的使用方法：
 
 * `* findHistories`
 * `* findLatestHistory`
 * `* revertTo`
 
-These static methods are for more advanced usage.
+以下静态方法，可以适用更多高级的使用方式：
 
 * `getTransactionModel`
 * `getLockModel`
