@@ -11,12 +11,10 @@ co(function * () {
 
   new Array(100).fill('').forEach(function () {
     co(function * () {
-      const t = yield Transaction.init({
-        connection
-      });
+      const t = new Transaction({ connection });
 
+      const TPerson = t.use(Person);
       yield t.try(function * () {
-        const TPerson = this.use(Person);
         yield TPerson.findByIdAndUpdate(person.id, {
           $set: { 'profile.nickname': 'Luna' }
         });
@@ -27,12 +25,10 @@ co(function * () {
 }).catch(console.error);
 
 function * createAPerson () {
-  const t = yield Transaction.init({
-    connection
-  });
+  const t = new Transaction({ connection });
 
+  const TPerson = t.use(Person);
   const p = yield t.try(function * () {
-    const TPerson = this.use(Person);
     return yield TPerson.create({
       name: 'Misery',
       gender: 'male',

@@ -3,31 +3,22 @@ const Wallet = require('./Wallet');
 const co = require('co');
 const Transaction = require('../');
 const connection = require('./connection');
-Transaction.noWarning = true;
 const assert = require('assert');
 
-co(function * () {
-  yield connection.dropDatabase();
-
-  const person = yield createAPerson();
-
-  yield updateNickname(person.id);
-
-  yield unsetPersonGender(person.id);
-
-  yield createAWalletAndRecharge(person.id);
-
+(async _ => {
+  await connection.dropDatabase();
+  const person = await createAPerson();
+  await updateNickname(person.id);
+  await unsetPersonGender(person.id);
+  await createAWalletAndRecharge(person.id);
   console.log('success!')
-}).catch(console.error);
+})();
 
-function * createAPerson () {
-  const t = yield Transaction.init({
-    connection
-  });
-
-  const p = yield t.try(function * () {
-    const TPerson = this.use(Person);
-    return yield TPerson.create({
+async function createAPerson () {
+  const t = new Transaction({ connection });
+  const TPerson = t.use(Person);
+  const p = await t.try(async _ => {
+    return await TPerson.create({
       name: 'Misery',
       gender: 'male',
       profile: {
@@ -36,7 +27,7 @@ function * createAPerson () {
     });
   });
 
-  const person = yield Person.findById(p.id);
+  const person = await Person.findById(p.id);
 
   assert(person);
   assert(person.name === 'Misery');
@@ -45,57 +36,57 @@ function * createAPerson () {
   return person;
 }
 
-function * updateNickname (id) {
-  const t = yield Transaction.init({ connection });
-  yield t.try(function * () {
-    const TPerson = this.use(Person);
-    yield TPerson.findByIdAndUpdate(id, {
+async function updateNickname (id) {
+  const t = new Transaction({ connection });
+  const TPerson = t.use(Person);
+  await t.try(async _ => {
+    await TPerson.findByIdAndUpdate(id, {
       $set: { 'profile.nickname': 'Luna' }
     });
   });
 
-  const person = yield Person.findById(id);
+  const person = await Person.findById(id);
   assert(person);
   assert(person.name === 'Misery');
   assert(person.profile.nickname === 'Luna');
 }
 
-function * unsetPersonGender (id) {
-  const t = yield Transaction.init({ connection });
-  yield t.try(function * () {
-    const TPerson = this.use(Person);
-    yield TPerson.findByIdAndUpdate(id, {
+async function unsetPersonGender (id) {
+  const t = new Transaction({ connection });
+  const TPerson = t.use(Person);
+  await t.try(async _ => {
+    await TPerson.findByIdAndUpdate(id, {
       $unset: { gender: '' }
     });
   });
 
-  const person = yield Person.findById(id);
+  const person = await Person.findById(id);
   assert(person);
   assert(person.name === 'Misery');
   assert(!person.gender);
 }
 
-function * createAWalletAndRecharge (personId) {
-  const t = yield Transaction.init({ connection });
-  const w = yield t.try(function * () {
-    const TWallet = this.use(Wallet);
-    const TPerson = this.use(Person);
+async function createAWalletAndRecharge (personId) {
+  const t = new Transaction({ connection });
+  const TWallet = t.use(Wallet);
+  const TPerson = t.use(Person);
 
-    const person = yield TPerson.findById(personId);
+  const w = await t.try(async _ => {
+    const person = await TPerson.findById(personId);
     assert(person);
 
-    const wallet = yield TWallet.create({
+    const wallet = await TWallet.create({
       person: person.id
     });
 
-    return yield TWallet.findByIdAndUpdate(wallet.id, {
+    return await TWallet.findByIdAndUpdate(wallet.id, {
       $set: {
         money: 100
       }
     });
   });
 
-  const wallet = yield Wallet.findById(w.id);
+  const wallet = await Wallet.findById(w.id);
   assert(wallet);
   assert(wallet.person.toString() === personId.toString());
   assert(wallet.money === 100);

@@ -8,7 +8,6 @@ const lockSchema = require('./lib/schemas/lock');
 const transactionSchema = require('./lib/schemas/transaction');
 const { errorTypes, states, operations } = require('./lib/constants');
 const MError = require('./lib/MError');
-const co = require('co');
 
 if (!mongoose.plugins.some(plugin => plugin[0] === timestamp)) {
   transactionSchema.plugin(timestamp);
@@ -25,6 +24,10 @@ const optionsSchema = Joi.object({
 }).unknown();
 
 class Transaction {
+  /**
+   * 验证参数，创建实例，绑定ID
+   * @param options
+   */
   constructor (options) {
     const { value, error } = Joi.validate(options, optionsSchema);
     if (error) throw error;
@@ -33,30 +36,39 @@ class Transaction {
     this._usedModels = {};
   }
 
+  /**
+   * 获取id
+   * @returns {*}
+   */
   get id () {
     return this._id;
   }
 
+  /**
+   * 获取事务model
+   * @constructor
+   */
   get TransactionModel () {
     const { connection, transactionCollectionName } =  this._options;
     return connection.model(transactionCollectionName, transactionSchema);
   }
 
+  /**
+   * 获取锁model
+   * @constructor
+   */
   get LockModel () {
     const { connection, lockCollectionName } = this._options;
     return connection.model(lockCollectionName, lockSchema);
   }
 
-  async _findTransaction () {
-    return await this.TransactionModel.findById(this.id);
-  }
-
-  async _initSubStateData (SSModel, doc) {
-    // Bind the transaction id to the sub-state doc and save it.
-    doc.__t = this.id;
-    return await SSModel.create(doc);
-  }
-
+  /**
+   * 锁定实体
+   * @param entity
+   * @param Model
+   * @returns {Promise.<void>}
+   * @private
+   */
   async _lock (entity, Model) {
     if (!entity) throw new MError(`Entity [${Model.modelName}:${entity._id}] is not exists`, errorTypes.INVALID_ENTITY_STATE);
     try {
@@ -78,10 +90,38 @@ class Transaction {
     }
   }
 
+  /**
+   * 初始化次态数据
+   * @param SSModel
+   * @param doc
+   * @returns {Promise.<doc>}
+   * @private
+   */
+  async _initSubStateData (SSModel, doc) {
+    // Bind the transaction id to the sub-state doc and save it.
+    doc.__t = this.id;
+    return await SSModel.create(doc);
+  }
+
+  /**
+   * 推入数据操作
+   * @param action
+   * @returns {Promise.<void>}
+   * @private
+   */
   async _pushAction (action) {
     await this.TransactionModel.findByIdAndUpdate(this.id, {
       $push: { actions: action }
     });
+  }
+
+  /**
+   * 查询绑定的事务数据
+   * @returns {Promise.<*|Promise|Query>}
+   * @private
+   */
+  async _findTransaction () {
+    return await this.TransactionModel.findById(this.id);
   }
 
   async _addUsedModel (Model, SSModel) {
@@ -112,7 +152,7 @@ class Transaction {
         biz: JSON.parse(JSON.stringify(this._options.biz || {}))
       });
     } else {
-      if ([states.CANCELLED, states.FINISHED].includes(transaction.state)) {
+      if ([states.CANCELLED, states.COMMITTED].includes(transaction.state)) {
         throw new MError(`The transaction [${transaction.id}] has [${transaction.state}].`, errorTypes.INVALID_TRANSACTION_STATE);
       }
     }
@@ -133,11 +173,14 @@ class Transaction {
     await this._addUsedModel(Model, SSModel);
     // Try to find the entity from the sub-state model,
     // if not, find it from src model and copy it to sub-state model.
-    let entity = await SSModel.findOne(criteria);
-    if (!entity && srcEntity) {
-      const doc = srcEntity.toJSON();
-      Reflect.deleteProperty(doc, '__v');
-      entity = await this._initSubStateData(SSModel, doc);
+    const entity = await SSModel.findOne(criteria);
+    if (!entity) {
+      if (srcEntity) {
+        const doc = srcEntity.toJSON();
+        Reflect.deleteProperty(doc, '__v');
+        await this._initSubStateData(SSModel, doc);
+      }
+      return srcEntity;
     }
     return entity;
   }
@@ -154,7 +197,8 @@ class Transaction {
       model: Model.modelName,
       entity: entity._id
     });
-    return await SSModel.findOneAndRemove(query);
+    await SSModel.findOneAndRemove(query);
+    return entity;
   }
 
   async _findByIdAndRemove (Model, SSModel, [id]) {
@@ -204,8 +248,9 @@ class Transaction {
   // Wrapper original Model to TModel to support transaction.
   use (Model, force = false) {
     const modelName = Model.modelName;
-    const SSModelName = `${this._options.subStateCollectionPrefix}${modelName}`;
     let SSModel;
+    const SSModelName = `${this._options.subStateCollectionPrefix}${modelName}`;
+    // Try to get registered sub-state Model, or register it.
     try {
       SSModel = this._options.connection.model(SSModelName);
     } catch (err) {
@@ -218,34 +263,44 @@ class Transaction {
         SSModel = this._options.connection.model(SSModelName, schema);
       } else throw err;
     }
-    if (!SSModel) throw new MError(`SSModel [${SSModelName}] has not registered!`, errorTypes.INTERNAL_ERROR);
+    if (!SSModel) throw new MError(`SSModel [${SSModelName}] has not registed!`, errorTypes.INTERNAL_ERROR);
     if (force) {
       this.forceUseModel(Model, SSModel);
     }
-
     return {
-      create: async (...params) => await this._create(Model, SSModel, params),
-      findOneAndUpdate: async (...params) => await this._findOneAndUpdate(Model, SSModel, params),
-      findByIdAndUpdate: async (...params) => await this._findByIdAndUpdate(Model, SSModel, params),
-      findOneAndRemove: async (...params) => await this._findOneAndRemove(Model, SSModel, params),
-      findByIdAndRemove: async (...params) => await this._findByIdAndRemove(Model, SSModel, params),
-      findOne: async (...params) => await this._findOneAndLock(Model, SSModel, params),
-      findById: async (...params) => await this._findById(Model, SSModel, params),
+      create: async (...params) => {
+        return await this._create(Model, SSModel, params);
+      },
+      findOneAndUpdate: async (...params) => {
+        return await this._findOneAndUpdate(Model, SSModel, params);
+      },
+      findByIdAndUpdate: async (...params) => {
+        return await this._findByIdAndUpdate.bind(this)(Model, SSModel, params);
+      },
+      findByIdAndRemove: async (...params) => {
+        return await this._findByIdAndRemove.bind(this)(Model, SSModel, params);
+      },
+      findOneAndRemove: async (...params) => {
+        return await this._findOneAndRemove.bind(this)(Model, SSModel, params);
+      },
+      findOne: async (...params) => {
+        return await this._findOneAndLock.bind(this)(Model, SSModel, params);
+      },
+      findById: async (...params) => {
+        return await this._findById.bind(this)(Model, SSModel, params);
+      },
     };
   }
 
-  async 'try' (wrapper = async _ => _) {
-    if (this._tried) throw new MError('The transaction has tried, do not try it again!', errorTypes.INVALID_OPERATION);
-    if (!['AsyncFunction', 'GeneratorFunction'].includes(wrapper.constructor.name)) {
-      throw new MError('wrapper should be a async or generator function.', errorTypes.INVALID_PARAMETER);
-    }
+  async 'try' (wrapper = function * () {
+  }) {
+    if (this._tried) throw new MError('The transaction have tried, do not try it again!', errorTypes.INVALID_OPERATION);
+    if (wrapper.constructor.name !== 'GeneratorFunction') throw new MError('wrapper should be a generator function.', errorTypes.INVALID_PARAMETER);
     let result;
     try {
       this._trying = true;
-      result = await co(function * () {
-        return yield wrapper.bind(this)()
-      }.bind(this));
-      await this.finish();
+      result = await wrapper.bind(this)();
+      await this.commit();
       this._trying = false;
     } catch (err) {
       await this.cancel(err);
@@ -255,23 +310,14 @@ class Transaction {
     return result;
   }
 
-  async _commit () {
+  async commit () {
     const transaction = await this._findTransaction();
     if (!transaction) return;
-    if (![states.PENDING, states.COMMITTED].includes(transaction.state)) {
-      throw new MError(`Expected the transaction [${this.id}] to be pending/committed, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
-    }
-    await this.TransactionModel.findByIdAndUpdate(this.id, {
-      $set: {
-        state: states.COMMITTED,
-      }
-    });
-    debug(`Transaction [${this.id}] committed! Start to copy entities.`);
+    if (transaction.state !== states.PENDING) throw new MError(`Expected the transaction [${this.id}] to be pending, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
     const entitiesActivated = [];
     for (let { model, entity, operation } of transaction.actions.reverse()) {
-      const entityName = `${model}:${entity}`;
-      if (entitiesActivated.includes(entityName)) continue;
-      entitiesActivated.push(entityName);
+      if (entitiesActivated.includes(`${model}:${entity}`)) continue;
+      entitiesActivated.push(`${model}:${entity}`);
       const { Model, SSModel } = this._usedModels[model] || {};
       if (!Model) throw new MError(`Model ${model} has not used, please use the model first`, errorTypes.INVALID_OPERATION);
       const subStateEntity = await SSModel.findById(entity);
@@ -293,22 +339,33 @@ class Transaction {
       }
     }
     await this._clearSubStateData();
-  }
-
-  async finish () {
-    const transaction = await this._findTransaction();
-    if(!transaction) return;
-    if(![states.COMMITTED, states.PENDING].includes(transaction.state)) {
-      throw new MError(`Expected the transaction [${this.id}] to be committed/pending, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
-    }
-    await this._commit();
     await this._unlock();
     await this.TransactionModel.findByIdAndUpdate(this.id, {
       $set: {
-        state: states.FINISHED
+        state: states.COMMITTED
       }
     });
-    debug(`Transaction [${this.id}] finished.`);
+    debug(`Transaction [${this.id}] committed!`);
+  }
+
+  async cancel (error) {
+    const transaction = await this._findTransaction();
+    if (!transaction) return;
+    if (![states.PENDING, states.ROLLBACK].includes(transaction.state)) {
+      throw new MError(`Expected the transaction [${this.id}] to be pending/rollback, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
+    }
+    await this._rollback();
+    await this._unlock();
+    await this.TransactionModel.findByIdAndUpdate(this.id, {
+      $set: {
+        state: states.CANCELLED
+      },
+      error: {
+        message: error.message,
+        stack: error.stack
+      }
+    });
+    debug(`Transaction [${this.id}] cancelled!`);
   }
 
   async _rollback () {
@@ -335,27 +392,6 @@ class Transaction {
       const { SSModel } = this._usedModels[modelName];
       await SSModel.remove({ __t: this.id });
     }
-  }
-
-  async cancel (error) {
-    debug(error.message);
-    const transaction = await this._findTransaction();
-    if (!transaction) return;
-    if (![states.PENDING, states.ROLLBACK].includes(transaction.state)) {
-      throw new MError(`Expected the transaction [${this.id}] to be pending/rollback, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
-    }
-    await this._rollback();
-    await this._unlock();
-    await this.TransactionModel.findByIdAndUpdate(this.id, {
-      $set: {
-        state: states.CANCELLED
-      },
-      error: {
-        message: error.message,
-        stack: error.stack
-      }
-    });
-    debug(`Transaction [${this.id}] cancelled.`);
   }
 
   async _unlock () {
