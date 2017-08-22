@@ -140,12 +140,13 @@ class Transaction {
     // Record usedModel
     await this._addUsedModel(Model, SSModel);
     // Lock entity
-    const isNew = await this._lock(srcEntity || { _id: (!criteria._id || criteria._id.constructor.name === 'Object') ? new ObjectId : criteria._id }, Model);
+    const query = srcEntity || { _id: (!criteria._id || criteria._id.constructor.name === 'Object') ? new ObjectId : criteria._id };
+    const isNew = await this._lock(query, Model);
     // Try to find the entity from the sub-state model,
     // if not, find it from src model and copy it to sub-state model.
     // if lock is new, clear the sub-state data.
     if (isNew) {
-      await SSModel.remove(criteria);
+      await SSModel.remove(query);
     }
     let entity = await SSModel.findOne(criteria);
     if (!entity && srcEntity) {
