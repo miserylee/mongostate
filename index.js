@@ -16,7 +16,7 @@ if (!mongoose.plugins.some(plugin => plugin[0] === timestamp)) {
 }
 
 const optionsSchema = Joi.object({
-  id: Joi.alternatives().try(Joi.string(), Joi.object().type(ObjectId)).allow(''),
+  id: Joi.alternatives().try(Joi.string().empty(''), Joi.object().type(ObjectId)).allow(null),
   connection: Joi.object().required(),
   transactionCollectionName: Joi.string().default('transaction'),
   lockCollectionName: Joi.string().default('lock'),
@@ -59,23 +59,32 @@ class Transaction {
 
   async _lock (entity, Model) {
     if (!entity) throw new MError(`Entity [${Model.modelName}:${entity._id}] is not exists`, errorTypes.INVALID_ENTITY_STATE);
+    /**
+     * Try to find the lock, if not, try to create the lock.
+     */
+    const lock = {
+      transaction: this.id,
+      model: Model.modelName,
+      entity: entity._id
+    };
+    const otherLock = await this.LockModel.findOne({
+      model: Model.modelName,
+      entity: entity._id,
+      transaction: { $ne: this.id }
+    });
+    let isNew = false;
+    if (otherLock) throw new MError(`Entity [${Model.modelName}:${entity.id}] is locked!`, errorTypes.ENTITY_LOCKED);
     try {
-      /**
-       * Try to find the lock, if not, try to create the lock.
-       */
-      const lock = {
-        transaction: this.id,
-        model: Model.modelName,
-        entity: entity._id
-      };
       if (!(await this.LockModel.findOne(lock))) {
         await this.LockModel.create(lock);
+        isNew = true;
       }
     } catch (err) {
       if (err.name === 'MongoError' && err.code === 11000) {
         throw new MError(`Entity [${Model.modelName}:${entity.id}] is locked!`, errorTypes.ENTITY_LOCKED);
       } else throw err;
     }
+    return isNew;
   }
 
   async _pushAction (action) {
@@ -128,11 +137,16 @@ class Transaction {
     if (transaction.state !== states.PENDING) {
       throw new MError('Transaction is not pending!', errorTypes.INVALID_TRANSACTION_STATE);
     }
-    await this._lock(srcEntity || { _id: (!criteria._id || criteria._id.constructor.name === 'Object') ? new ObjectId : criteria._id }, Model);
     // Record usedModel
     await this._addUsedModel(Model, SSModel);
+    // Lock entity
+    const isNew = await this._lock(srcEntity || { _id: (!criteria._id || criteria._id.constructor.name === 'Object') ? new ObjectId : criteria._id }, Model);
     // Try to find the entity from the sub-state model,
     // if not, find it from src model and copy it to sub-state model.
+    // if lock is new, clear the sub-state data.
+    if (isNew) {
+      await SSModel.remove(criteria);
+    }
     let entity = await SSModel.findOne(criteria);
     if (!entity && srcEntity) {
       const doc = srcEntity.toJSON();
@@ -255,20 +269,17 @@ class Transaction {
     return result;
   }
 
-  async _commit () {
+  async _activate () {
     const transaction = await this._findTransaction();
     if (!transaction) return;
-    if (![states.PENDING, states.COMMITTED].includes(transaction.state)) {
-      throw new MError(`Expected the transaction [${this.id}] to be pending/committed, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
+    if (![states.ACTIVATED, states.COMMITTED].includes(transaction.state)) {
+      throw new MError(`Expected the transaction [${this.id}] to be activated/committed, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
     }
-    await this.TransactionModel.findByIdAndUpdate(this.id, {
-      $set: {
-        state: states.COMMITTED,
-      }
-    });
+    if (transaction.state === states.ACTIVATED) return;
     debug(`Transaction [${this.id}] committed! Start to copy entities.`);
     const entitiesActivated = [];
-    for (let { model, entity, operation } of transaction.actions.reverse()) {
+    const actions = transaction.actions.reverse();
+    for (let { model, entity, operation } of actions) {
       const entityName = `${model}:${entity}`;
       if (entitiesActivated.includes(entityName)) continue;
       entitiesActivated.push(entityName);
@@ -288,17 +299,36 @@ class Transaction {
         } else {
           await Model.create(doc);
         }
-      } else {
+      } else if (operation === operations.REMOVE) {
         await Model.findByIdAndRemove(entity);
       }
     }
+    await this.TransactionModel.findByIdAndUpdate(this.id, {
+      $set: {
+        state: states.ACTIVATED
+      }
+    });
+  }
+
+  async _commit () {
+    const transaction = await this._findTransaction();
+    if (!transaction) return;
+    if (![states.PENDING, states.COMMITTED].includes(transaction.state)) {
+      throw new MError(`Expected the transaction [${this.id}] to be pending/committed, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
+    }
+    await this.TransactionModel.findByIdAndUpdate(this.id, {
+      $set: {
+        state: states.COMMITTED,
+      }
+    });
+    await this._activate();
     await this._clearSubStateData();
   }
 
   async finish () {
     const transaction = await this._findTransaction();
-    if(!transaction) return;
-    if(![states.COMMITTED, states.PENDING].includes(transaction.state)) {
+    if (!transaction) return;
+    if (![states.COMMITTED, states.PENDING].includes(transaction.state)) {
       throw new MError(`Expected the transaction [${this.id}] to be committed/pending, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
     }
     await this._commit();
