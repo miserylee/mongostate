@@ -314,7 +314,7 @@ class Transaction {
   async _commit () {
     const transaction = await this._findTransaction();
     if (!transaction) return;
-    if (![states.PENDING, states.COMMITTED].includes(transaction.state)) {
+    if (![states.PENDING, states.COMMITTED, states.ACTIVATED].includes(transaction.state)) {
       throw new MError(`Expected the transaction [${this.id}] to be pending/committed, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
     }
     await this.TransactionModel.findByIdAndUpdate(this.id, {
@@ -329,7 +329,7 @@ class Transaction {
   async finish () {
     const transaction = await this._findTransaction();
     if (!transaction) return;
-    if (![states.COMMITTED, states.PENDING].includes(transaction.state)) {
+    if (![states.COMMITTED, states.PENDING, states.ACTIVATED].includes(transaction.state)) {
       throw new MError(`Expected the transaction [${this.id}] to be committed/pending, but got ${transaction.state}`, errorTypes.INVALID_TRANSACTION_STATE);
     }
     await this._commit();
